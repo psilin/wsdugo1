@@ -1,1 +1,1 @@
-My solutions to course Development web services using golang (part 1) homework assignments.
+My solutions to "Development web services using golang (part 1)" course homework assignments.
