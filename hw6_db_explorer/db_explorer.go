@@ -23,6 +23,52 @@ func ErrorResponse(w http.ResponseWriter, status int, message string) {
 	http.Error(w, string(data), status)
 }
 
+// ProcessTableMetadata - fills needed metadata for each table
+func ProcessTableMetadata(data []interface{}, cols []string) MetaData {
+	meta := MetaData{}
+	for i, dt := range data {
+		dt = *dt.(*interface{})
+		var r sql.NullString
+		err := r.Scan(dt)
+		if err != nil {
+			panic(err)
+		}
+		//fmt.Printf("%s\n", cols[i])
+		// actually go through metadata
+		if cols[i] == "Field" {
+			meta.Name = r.String
+		} else if cols[i] == "Type" {
+			if strings.Contains(r.String, "int") {
+				meta.Type = "int"
+			} else if strings.Contains(r.String, "float") {
+				meta.Type = "float"
+			} else {
+				meta.Type = "string"
+			}
+		} else if cols[i] == "Null" {
+			if r.String == "YES" {
+				meta.Nullable = true
+			} else {
+				meta.Nullable = false
+			}
+		} else if cols[i] == "Key" {
+			if r.String != "" {
+				meta.Key = true
+			} else {
+				meta.Key = false
+			}
+		} else if cols[i] == "Extra" {
+			if r.String != "" {
+				meta.AutoIncrement = true
+			} else {
+				meta.AutoIncrement = false
+			}
+		}
+	}
+	//fmt.Printf("MD:%s|%s|%t|%t|%t\n", meta.Name, meta.Type, meta.Nullable, meta.Key, meta.AutoIncrement)
+	return meta
+}
+
 // ProcessRecord - unpacks sql record into map
 func ProcessRecord(tblName string, data []interface{}, cols []string) map[string]interface{} {
 	record := make(map[string]interface{}, len(data))
@@ -33,7 +79,7 @@ func ProcessRecord(tblName string, data []interface{}, cols []string) map[string
 		if err != nil {
 			panic(err)
 		}
-		// fmt.Printf("%s\n", cols[i])
+		//fmt.Printf("%s\n", cols[i])
 		if !r.Valid {
 			var filler interface{}
 			record[cols[i]] = filler
@@ -48,16 +94,25 @@ func ProcessRecord(tblName string, data []interface{}, cols []string) map[string
 	return record
 }
 
+// MetaData - needed metadata for table
+type MetaData struct {
+	Name          string
+	Type          string
+	Key           bool
+	AutoIncrement bool
+	Nullable      bool
+}
+
 // DbExplorer - DB browser instance
 type DbExplorer struct {
 	DB     *sql.DB
-	Tables []string
-	Meta   map[string][]*sql.ColumnType
+	Tables []string // store it to preserve order
+	Meta   map[string][]MetaData
 }
 
 // NewDbExplorer - creates DbExplorer instannce
 func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
-	dbe := DbExplorer{DB: db, Tables: []string{}, Meta: make(map[string][]*sql.ColumnType)}
+	dbe := DbExplorer{DB: db, Tables: []string{}, Meta: map[string][]MetaData{}}
 	res, err := dbe.DB.Query("SHOW TABLES")
 	if err != nil {
 		return nil, err
@@ -71,25 +126,37 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 	}
 	res.Close()
 
-	// get column metadata for each table
 	for _, table := range dbe.Tables {
 		res, err := dbe.DB.Query("SHOW FULL COLUMNS FROM " + table)
 		if err != nil {
-			return nil, err
+			panic(err)
 		}
+		cols, err := res.Columns()
+		if err != nil {
+			panic(err)
+		}
+		meta := []MetaData{}
 		for res.Next() {
-			data, err := res.ColumnTypes()
-			if err != nil {
-				return nil, err
+			data := make([]interface{}, len(cols))
+			for i := range cols {
+				data[i] = new(interface{})
 			}
-			dbe.Meta[table] = data
+			err := res.Scan(data...)
+			if err != nil {
+				panic(err)
+			}
+			//fmt.Printf("TABLE NAME: %s\n", table)
+			mt := ProcessTableMetadata(data, cols)
+			meta = append(meta, mt)
 		}
+		dbe.Meta[table] = meta
 		res.Close()
 	}
 
 	return &dbe, nil
 }
 
+// ServeHTTP - to meet interface
 func (dbe *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == "" {
 		if r.URL.Path == "/" {
@@ -148,14 +215,12 @@ func (dbe *DbExplorer) GetList(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := dbe.DB.Query("SELECT * FROM "+tblName+" LIMIT ?, ?", offset, limit)
 	if err != nil {
-		log.Fatal(err)
-		return
+		panic(err)
 	}
 
 	cols, err := res.Columns()
 	if err != nil {
-		log.Fatal(err)
-		return
+		panic(err)
 	}
 
 	records := []map[string]interface{}{}
@@ -166,8 +231,7 @@ func (dbe *DbExplorer) GetList(w http.ResponseWriter, r *http.Request) {
 		}
 		err := res.Scan(data...)
 		if err != nil {
-			log.Fatal(err)
-			return
+			panic(err)
 		}
 		record := ProcessRecord(tblName, data, cols)
 		records = append(records, record)
@@ -178,8 +242,7 @@ func (dbe *DbExplorer) GetList(w http.ResponseWriter, r *http.Request) {
 	rsp["response"] = rspin
 	rspdata, err := json.Marshal(rsp)
 	if err != nil {
-		log.Fatal(err)
-		return
+		panic(err)
 	}
 	http.Error(w, string(rspdata), http.StatusOK)
 
@@ -189,6 +252,48 @@ func (dbe *DbExplorer) GetList(w http.ResponseWriter, r *http.Request) {
 
 // Get - gets record
 func (dbe *DbExplorer) Get(w http.ResponseWriter, r *http.Request) {
+	// check table belongs to db
+	strs := strings.Split(r.URL.Path, "/")
+	tblName, id := strs[1], strs[2]
+	if _, ok := dbe.Meta[tblName]; !ok {
+		ErrorResponse(w, http.StatusNotFound, "unknown table")
+		return
+	}
+	res, err := dbe.DB.Query("SELECT * FROM "+tblName+" WHERE id = ?", id)
+	if err != nil {
+		panic(err)
+	}
+
+	cols, err := res.Columns()
+	if err != nil {
+		panic(err)
+	}
+
+	if res.Next() {
+		data := make([]interface{}, len(cols))
+		for i := range cols {
+			data[i] = new(interface{})
+		}
+		err := res.Scan(data...)
+		if err != nil {
+			panic(err)
+		}
+		record := ProcessRecord(tblName, data, cols)
+		rspin := make(map[string]interface{})
+		rspin["record"] = record
+		rsp := make(map[string]interface{})
+		rsp["response"] = rspin
+		rspdata, err := json.Marshal(rsp)
+		if err != nil {
+			panic(err)
+		}
+		http.Error(w, string(rspdata), http.StatusOK)
+	} else {
+		ErrorResponse(w, http.StatusNotFound, "record not found")
+	}
+
+	// close Rows
+	res.Close()
 }
 
 // Create - creates record
