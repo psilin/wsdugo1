@@ -25,6 +25,8 @@ func main() {
 		panic(err)
 	}
 
+	db.SetMaxOpenConns(1)
+
 	handler, err := NewDbExplorer(db)
 	if err != nil {
 		panic(err)
