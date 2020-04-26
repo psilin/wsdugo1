@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -21,11 +22,40 @@ type MyLogger struct {
 	finish context.CancelFunc
 }
 
+// MyStat -
+type MyStat struct {
+	byMethod   map[string]uint64
+	byConsumer map[string]uint64
+	finish     context.CancelFunc
+}
+
+// Add -
+func (ms *MyStat) Add(consumer, method string) {
+	if _, ok := ms.byConsumer[consumer]; !ok {
+		ms.byConsumer[consumer] = 1
+	} else {
+		ms.byConsumer[consumer]++
+	}
+
+	if _, ok := ms.byMethod[method]; !ok {
+		ms.byMethod[method] = 1
+	} else {
+		ms.byMethod[method]++
+	}
+}
+
+// Reset -
+func (ms *MyStat) Reset() {
+	ms.byMethod = make(map[string]uint64)
+	ms.byConsumer = make(map[string]uint64)
+}
+
 // MyServer -
 type MyServer struct {
 	mu   sync.RWMutex
 	acl  map[string][]string
-	myls []MyLogger
+	myls []*MyLogger
+	myss []*MyStat
 	wg   *sync.WaitGroup
 }
 
@@ -34,7 +64,8 @@ func NewMyServer(ACLData map[string][]string) *MyServer {
 	return &MyServer{
 		mu:   sync.RWMutex{},
 		acl:  ACLData,
-		myls: []MyLogger{},
+		myls: []*MyLogger{},
+		myss: []*MyStat{},
 		wg:   &sync.WaitGroup{},
 	}
 }
@@ -49,6 +80,11 @@ func (srv *MyServer) Logging(n *Nothing, als Admin_LoggingServer) error {
 
 	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Admin/Logging", Host: "127.0.0.1:"}
 	srv.mu.Lock()
+	// add to stat
+	for _, mys := range srv.myss {
+		mys.Add(e.Consumer, e.Method)
+	}
+
 	for _, myl := range srv.myls {
 		myl.chev <- e
 	}
@@ -59,7 +95,7 @@ func (srv *MyServer) Logging(n *Nothing, als Admin_LoggingServer) error {
 	myl := MyLogger{chev: make(chan Event, 1), finish: fin}
 	srv.wg.Add(1)
 	srv.mu.Lock()
-	srv.myls = append(srv.myls, myl)
+	srv.myls = append(srv.myls, &myl)
 	srv.mu.Unlock()
 LOOP:
 	for {
@@ -87,10 +123,49 @@ func (srv *MyServer) Statistics(si *StatInterval, ass Admin_StatisticsServer) er
 
 	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Admin/Statistics", Host: "127.0.0.1:"}
 	srv.mu.Lock()
+	// add to stat
+	for _, mys := range srv.myss {
+		mys.Add(e.Consumer, e.Method)
+	}
+
 	for _, myl := range srv.myls {
 		myl.chev <- e
 	}
+
+	ctx, fin := context.WithCancel(context.Background())
+	mys := MyStat{finish: fin, byConsumer: make(map[string]uint64), byMethod: make(map[string]uint64)}
+	srv.myss = append(srv.myss, &mys)
 	srv.mu.Unlock()
+
+	srv.wg.Add(2)
+	ticker := time.NewTicker(time.Duration(si.IntervalSeconds) * time.Second)
+	inch := make(chan interface{}, 1)
+	go func(t *time.Ticker, i chan interface{}, wgg *sync.WaitGroup) {
+		for range t.C {
+			inch <- 0
+		}
+		wgg.Done()
+	}(ticker, inch, srv.wg)
+
+LOOP:
+	for {
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			break LOOP
+		case <-inch:
+			srv.mu.Lock()
+			st := Stat{ByMethod: mys.byMethod, ByConsumer: mys.byConsumer}
+			err := ass.Send(&st)
+			if err != nil {
+				fmt.Printf("STAT: %s\n", err)
+			}
+			mys.Reset()
+			srv.mu.Unlock()
+		}
+
+	}
+	srv.wg.Done()
 	return nil
 }
 
@@ -104,6 +179,11 @@ func (srv *MyServer) Check(ctx context.Context, n *Nothing) (*Nothing, error) {
 
 	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Biz/Check", Host: "127.0.0.1:"}
 	srv.mu.Lock()
+	// add to stat
+	for _, mys := range srv.myss {
+		mys.Add(e.Consumer, e.Method)
+	}
+
 	for _, myl := range srv.myls {
 		myl.chev <- e
 	}
@@ -121,6 +201,11 @@ func (srv *MyServer) Add(ctx context.Context, n *Nothing) (*Nothing, error) {
 
 	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Biz/Add", Host: "127.0.0.1:"}
 	srv.mu.Lock()
+	// add to stat
+	for _, mys := range srv.myss {
+		mys.Add(e.Consumer, e.Method)
+	}
+
 	for _, myl := range srv.myls {
 		myl.chev <- e
 	}
@@ -138,6 +223,11 @@ func (srv *MyServer) Test(ctx context.Context, n *Nothing) (*Nothing, error) {
 
 	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Biz/Test", Host: "127.0.0.1:"}
 	srv.mu.Lock()
+	// add to stat
+	for _, mys := range srv.myss {
+		mys.Add(e.Consumer, e.Method)
+	}
+
 	for _, myl := range srv.myls {
 		myl.chev <- e
 	}
@@ -250,8 +340,13 @@ func StartMyMicroservice(ctx context.Context, listenAddr, ACLData string) error 
 	go func(ctx context.Context, gserver *grpc.Server, mysrv *MyServer) {
 		<-ctx.Done()
 		//fmt.Println("stopping server at :8082")
+		// cancel loggers
 		for _, myl := range mysrv.myls {
 			myl.finish()
+		}
+		// cancel statters
+		for _, mys := range mysrv.myss {
+			mys.finish()
 		}
 		mysrv.wg.Wait()
 		gserver.GracefulStop()
