@@ -70,15 +70,14 @@ func NewMyServer(ACLData map[string][]string) *MyServer {
 	}
 }
 
-// Logging -
-func (srv *MyServer) Logging(n *Nothing, als Admin_LoggingServer) error {
+func (srv *MyServer) logAndStat(ctx context.Context, method string) {
 	// logging
-	md, ok := metadata.FromIncomingContext(als.Context())
+	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return status.Errorf(codes.Unauthenticated, "Authorization failed")
+		return
 	}
 
-	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Admin/Logging", Host: "127.0.0.1:"}
+	e := Event{Consumer: md.Get("consumer")[0], Method: method, Host: "127.0.0.1:"}
 	srv.mu.Lock()
 	// add to stat
 	for _, mys := range srv.myss {
@@ -89,6 +88,11 @@ func (srv *MyServer) Logging(n *Nothing, als Admin_LoggingServer) error {
 		myl.chev <- e
 	}
 	srv.mu.Unlock()
+}
+
+// Logging -
+func (srv *MyServer) Logging(n *Nothing, als Admin_LoggingServer) error {
+	srv.logAndStat(als.Context(), "/main.Admin/Logging")
 
 	// add logger
 	ctx, fin := context.WithCancel(context.Background())
@@ -115,29 +119,16 @@ LOOP:
 
 // Statistics -
 func (srv *MyServer) Statistics(si *StatInterval, ass Admin_StatisticsServer) error {
-	// logging
-	md, ok := metadata.FromIncomingContext(ass.Context())
-	if !ok {
-		return status.Errorf(codes.Unauthenticated, "Authorization failed")
-	}
+	srv.logAndStat(ass.Context(), "/main.Admin/Statistics")
 
-	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Admin/Statistics", Host: "127.0.0.1:"}
-	srv.mu.Lock()
-	// add to stat
-	for _, mys := range srv.myss {
-		mys.Add(e.Consumer, e.Method)
-	}
-
-	for _, myl := range srv.myls {
-		myl.chev <- e
-	}
-
+	// add stat
 	ctx, fin := context.WithCancel(context.Background())
 	mys := MyStat{finish: fin, byConsumer: make(map[string]uint64), byMethod: make(map[string]uint64)}
+	srv.wg.Add(2)
+	srv.mu.Lock()
 	srv.myss = append(srv.myss, &mys)
 	srv.mu.Unlock()
 
-	srv.wg.Add(2)
 	ticker := time.NewTicker(time.Duration(si.IntervalSeconds) * time.Second)
 	inch := make(chan interface{}, 1)
 	go func(t *time.Ticker, i chan interface{}, wgg *sync.WaitGroup) {
@@ -171,67 +162,19 @@ LOOP:
 
 // Check -
 func (srv *MyServer) Check(ctx context.Context, n *Nothing) (*Nothing, error) {
-	// logging
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "Authorization failed")
-	}
-
-	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Biz/Check", Host: "127.0.0.1:"}
-	srv.mu.Lock()
-	// add to stat
-	for _, mys := range srv.myss {
-		mys.Add(e.Consumer, e.Method)
-	}
-
-	for _, myl := range srv.myls {
-		myl.chev <- e
-	}
-	srv.mu.Unlock()
+	srv.logAndStat(ctx, "/main.Biz/Check")
 	return &Nothing{}, nil
 }
 
 // Add -
 func (srv *MyServer) Add(ctx context.Context, n *Nothing) (*Nothing, error) {
-	// logging
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "Authorization failed")
-	}
-
-	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Biz/Add", Host: "127.0.0.1:"}
-	srv.mu.Lock()
-	// add to stat
-	for _, mys := range srv.myss {
-		mys.Add(e.Consumer, e.Method)
-	}
-
-	for _, myl := range srv.myls {
-		myl.chev <- e
-	}
-	srv.mu.Unlock()
+	srv.logAndStat(ctx, "/main.Biz/Add")
 	return &Nothing{}, nil
 }
 
 // Test -
 func (srv *MyServer) Test(ctx context.Context, n *Nothing) (*Nothing, error) {
-	// logging
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "Authorization failed")
-	}
-
-	e := Event{Consumer: md.Get("consumer")[0], Method: "/main.Biz/Test", Host: "127.0.0.1:"}
-	srv.mu.Lock()
-	// add to stat
-	for _, mys := range srv.myss {
-		mys.Add(e.Consumer, e.Method)
-	}
-
-	for _, myl := range srv.myls {
-		myl.chev <- e
-	}
-	srv.mu.Unlock()
+	srv.logAndStat(ctx, "/main.Biz/Test")
 	return &Nothing{}, nil
 }
 
